@@ -1,0 +1,15 @@
+# Test URLs for Odysseus Terminal Browser
+
+Simple text-heavy sites (good for terminal display):
+- https://example.com
+- https://news.ycombinator.com
+- https://en.wikipedia.org/wiki/Web_browser
+- https://www.gutenberg.org
+
+Technical documentation:
+- https://go.dev
+- https://docs.python.org
+- https://developer.mozilla.org
+
+Note: Complex JavaScript-heavy sites may not display well in terminal mode.
+This POC focuses on text extraction and basic navigation.
