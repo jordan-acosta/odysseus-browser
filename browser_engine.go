@@ -10,6 +10,12 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
+// Link represents a clickable link on the page
+type Link struct {
+	Text string // Display text
+	URL  string // Absolute URL
+}
+
 // BrowserEngine handles all browser operations
 type BrowserEngine struct {
 	browser *rod.Browser
@@ -58,7 +64,7 @@ func NewBrowserEngine() (*BrowserEngine, error) {
 }
 
 // Navigate loads a URL and returns page info
-func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, err error) {
+func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, links []Link, err error) {
 	// Ensure URL has protocol
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		url = "https://" + url
@@ -70,13 +76,13 @@ func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, e
 
 	err = b.page.Context(ctx).Navigate(url)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 
 	// Wait for page to load
 	err = b.page.WaitLoad()
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", nil, err
 	}
 
 	// Get page title
@@ -91,10 +97,13 @@ func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, e
 	// Extract text content
 	content = b.extractContent()
 
+	// Extract links
+	links = b.extractLinks()
+
 	// Get final URL (after redirects)
 	finalURL = b.page.MustInfo().URL
 
-	return title, content, finalURL, nil
+	return title, content, finalURL, links, nil
 }
 
 // extractContent gets readable text from the page
@@ -185,6 +194,65 @@ func (b *BrowserEngine) extractContent() string {
 	}
 
 	return content
+}
+
+// extractLinks gets all clickable links from the page
+func (b *BrowserEngine) extractLinks() []Link {
+	// Use JavaScript to extract links
+	linksData := b.page.MustEval(`() => {
+		const links = [];
+		const anchorElements = document.querySelectorAll('a[href]');
+
+		anchorElements.forEach(anchor => {
+			// Skip if link is hidden or in nav/footer/header (optional - can be removed if you want all links)
+			const style = window.getComputedStyle(anchor);
+			if (style.display === 'none' || style.visibility === 'hidden') {
+				return;
+			}
+
+			const href = anchor.href; // Already absolute
+			let text = (anchor.innerText || anchor.textContent || '').trim();
+
+			// Skip empty links or javascript: links
+			if (!href || href.startsWith('javascript:') || href.startsWith('mailto:') || !text) {
+				return;
+			}
+
+			// Truncate very long link text
+			if (text.length > 100) {
+				text = text.substring(0, 97) + '...';
+			}
+
+			// Skip duplicate links (same URL and text)
+			const isDuplicate = links.some(l => l.url === href && l.text === text);
+			if (!isDuplicate) {
+				links.push({ text: text, url: href });
+			}
+		});
+
+		return links;
+	}`)
+
+	// Convert to our Link struct
+	var links []Link
+
+	// Parse the JSON result
+	arr := linksData.Arr()
+	for _, item := range arr {
+		obj := item.Map()
+
+		text := obj["text"].String()
+		url := obj["url"].String()
+
+		if text != "" && url != "" {
+			links = append(links, Link{
+				Text: text,
+				URL:  url,
+			})
+		}
+	}
+
+	return links
 }
 
 // Reload refreshes the current page

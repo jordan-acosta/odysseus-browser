@@ -16,6 +16,7 @@ type viewMode int
 const (
 	urlInputMode viewMode = iota
 	browsingMode
+	linkSelectionMode
 )
 
 // Messages for async browser operations
@@ -23,6 +24,7 @@ type pageLoadedMsg struct {
 	title   string
 	content string
 	url     string
+	links   []Link
 }
 
 type errorMsg struct {
@@ -51,6 +53,12 @@ type model struct {
 	history     []string
 	historyIdx  int
 
+	// Links
+	links            []Link
+	linkSearchInput  textinput.Model
+	selectedLinkIdx  int
+	linkScrollOffset int
+
 	// Display
 	width  int
 	height int
@@ -73,12 +81,22 @@ func initialModel() model {
 	ti.CharLimit = 256
 	ti.Width = 80
 
+	// Create text input for link search
+	linkSearch := textinput.New()
+	linkSearch.Placeholder = "Search links or enter number..."
+	linkSearch.CharLimit = 100
+	linkSearch.Width = 80
+
 	return model{
 		mode:               urlInputMode,
 		urlInput:           ti,
+		linkSearchInput:    linkSearch,
 		currentURL:         "",
 		history:            make([]string, 0),
 		historyIdx:         -1,
+		links:              make([]Link, 0),
+		selectedLinkIdx:    0,
+		linkScrollOffset:   0,
 		width:              80,
 		height:             24,
 		engineReady:        false,
@@ -111,7 +129,7 @@ func (m *model) navigate(url string) tea.Cmd {
 			return errorMsg{err: fmt.Errorf("browser engine is nil - this is a bug")}
 		}
 
-		title, content, finalURL, err := m.engine.Navigate(url)
+		title, content, finalURL, links, err := m.engine.Navigate(url)
 		if err != nil {
 			return errorMsg{err: err}
 		}
@@ -120,6 +138,7 @@ func (m *model) navigate(url string) tea.Cmd {
 			title:   title,
 			content: content,
 			url:     finalURL,
+			links:   links,
 		}
 	}
 }
@@ -177,6 +196,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.urlInput.SetValue(m.currentURL)
 				m.urlInput.Focus()
 				return m, textinput.Blink
+			case "/", "g":
+				// Open link selection mode
+				if len(m.links) > 0 {
+					m.mode = linkSelectionMode
+					m.selectedLinkIdx = 0
+					m.linkScrollOffset = 0
+					m.linkSearchInput.SetValue("")
+					m.linkSearchInput.Focus()
+					return m, textinput.Blink
+				}
 			case "b":
 				// Go back in history
 				if m.historyIdx > 0 && m.engineReady {
@@ -205,6 +234,67 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "k", "up":
 				// Scroll up
 			}
+
+		case linkSelectionMode:
+			switch msg.Type {
+			case tea.KeyCtrlC:
+				return m, tea.Quit
+			case tea.KeyEsc:
+				// Return to browsing mode
+				m.mode = browsingMode
+				m.linkSearchInput.Blur()
+				return m, nil
+			case tea.KeyEnter:
+				// Navigate to selected link
+				if m.selectedLinkIdx >= 0 && m.selectedLinkIdx < len(m.links) {
+					link := m.links[m.selectedLinkIdx]
+					m.mode = browsingMode
+					m.loading = true
+					m.linkSearchInput.Blur()
+					return m, m.navigate(link.URL)
+				}
+			case tea.KeyUp, tea.KeyCtrlK:
+				if m.selectedLinkIdx > 0 {
+					m.selectedLinkIdx--
+					// Adjust scroll offset if needed
+					if m.selectedLinkIdx < m.linkScrollOffset {
+						m.linkScrollOffset = m.selectedLinkIdx
+					}
+				}
+				return m, nil
+			case tea.KeyDown, tea.KeyCtrlJ:
+				if m.selectedLinkIdx < len(m.links)-1 {
+					m.selectedLinkIdx++
+					// Adjust scroll offset if needed
+					maxVisible := m.height - 10
+					if m.selectedLinkIdx >= m.linkScrollOffset+maxVisible {
+						m.linkScrollOffset = m.selectedLinkIdx - maxVisible + 1
+					}
+				}
+				return m, nil
+			default:
+				// Handle number keys (0-9) for quick link selection
+				if len(msg.String()) == 1 {
+					char := msg.String()[0]
+					if char >= '0' && char <= '9' {
+						// Build number from input
+						currentVal := m.linkSearchInput.Value()
+						m.linkSearchInput.SetValue(currentVal + string(char))
+						m.linkSearchInput, cmd = m.linkSearchInput.Update(msg)
+						return m, cmd
+					}
+				}
+				// Update search input
+				m.linkSearchInput, cmd = m.linkSearchInput.Update(msg)
+				// Try to parse as number for quick selection
+				if val := m.linkSearchInput.Value(); val != "" {
+					var num int
+					if _, err := fmt.Sscanf(val, "%d", &num); err == nil && num > 0 && num <= len(m.links) {
+						m.selectedLinkIdx = num - 1
+					}
+				}
+				return m, cmd
+			}
 		}
 
 	case pageLoadedMsg:
@@ -212,6 +302,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pageTitle = msg.title
 		m.pageContent = msg.content
 		m.currentURL = msg.url
+		m.links = msg.links
+		m.selectedLinkIdx = 0
+		m.linkScrollOffset = 0
 		m.err = nil
 
 		// Update history
@@ -348,15 +441,75 @@ func (m model) View() string {
 		}
 	}
 
+	// Link selection mode
+	if m.mode == linkSelectionMode {
+		s.WriteString("\n")
+		s.WriteString(titleStyle.Render(fmt.Sprintf("📎 Links (%d found)", len(m.links))))
+		s.WriteString("\n\n")
+
+		// Show search input
+		s.WriteString(m.linkSearchInput.View())
+		s.WriteString("\n\n")
+
+		// Calculate how many links we can show
+		maxVisible := m.height - 15
+		if maxVisible < 5 {
+			maxVisible = 5
+		}
+
+		// Show links with selection
+		endIdx := m.linkScrollOffset + maxVisible
+		if endIdx > len(m.links) {
+			endIdx = len(m.links)
+		}
+
+		for i := m.linkScrollOffset; i < endIdx; i++ {
+			link := m.links[i]
+			linkNum := i + 1
+
+			// Style for selected vs unselected
+			var linkLine string
+			if i == m.selectedLinkIdx {
+				selectedStyle := lipgloss.NewStyle().
+					Foreground(lipgloss.Color("205")).
+					Background(lipgloss.Color("235")).
+					Bold(true)
+				linkLine = selectedStyle.Render(fmt.Sprintf("→ [%d] %s", linkNum, link.Text))
+			} else {
+				linkLine = fmt.Sprintf("  [%d] %s", linkNum, link.Text)
+			}
+
+			s.WriteString(linkLine)
+			s.WriteString("\n")
+		}
+
+		// Show scroll indicator if needed
+		if len(m.links) > maxVisible {
+			scrollInfo := fmt.Sprintf("  (Showing %d-%d of %d links)",
+				m.linkScrollOffset+1, endIdx, len(m.links))
+			s.WriteString("\n")
+			s.WriteString(helpStyle.Render(scrollInfo))
+		}
+	}
+
 	// Help text at bottom
 	s.WriteString("\n\n")
 	if m.mode == browsingMode {
 		help := []string{
 			"[l/Ctrl+L] URL bar",
+			"[/,g] Links",
 			"[b] Back",
 			"[f] Forward",
 			"[r] Reload",
 			"[q/Ctrl+C] Quit",
+		}
+		s.WriteString(helpStyle.Render(strings.Join(help, " • ")))
+	} else if m.mode == linkSelectionMode {
+		help := []string{
+			"[↑↓] Navigate",
+			"[0-9] Quick select",
+			"[Enter] Open",
+			"[Esc] Cancel",
 		}
 		s.WriteString(helpStyle.Render(strings.Join(help, " • ")))
 	}
