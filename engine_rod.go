@@ -10,20 +10,15 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 )
 
-// Link represents a clickable link on the page
-type Link struct {
-	Text string // Display text
-	URL  string // Absolute URL
-}
-
-// BrowserEngine handles all browser operations
-type BrowserEngine struct {
+// RodEngine implements Engine using rod (headless Chrome)
+// Supports JavaScript execution but requires Chrome/Chromium
+type RodEngine struct {
 	browser *rod.Browser
 	page    *rod.Page
 }
 
-// NewBrowserEngine creates a new browser engine instance
-func NewBrowserEngine() (*BrowserEngine, error) {
+// NewRodEngine creates a new rod-based browser engine
+func NewRodEngine() (*RodEngine, error) {
 	// Try to find Chrome/Chromium on the system
 	path, exists := launcher.LookPath()
 	var l string
@@ -57,14 +52,14 @@ func NewBrowserEngine() (*BrowserEngine, error) {
 		UserAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
 	})
 
-	return &BrowserEngine{
+	return &RodEngine{
 		browser: browser,
 		page:    page,
 	}, nil
 }
 
 // Navigate loads a URL and returns page info
-func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, links []Link, err error) {
+func (r *RodEngine) Navigate(url string) (title, content, finalURL string, links []Link, err error) {
 	// Ensure URL has protocol
 	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") {
 		url = "https://" + url
@@ -74,19 +69,19 @@ func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, l
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	err = b.page.Context(ctx).Navigate(url)
+	err = r.page.Context(ctx).Navigate(url)
 	if err != nil {
 		return "", "", "", nil, err
 	}
 
 	// Wait for page to load
-	err = b.page.WaitLoad()
+	err = r.page.WaitLoad()
 	if err != nil {
 		return "", "", "", nil, err
 	}
 
 	// Get page title
-	titleElem, err := b.page.Element("title")
+	titleElem, err := r.page.Element("title")
 	if err == nil && titleElem != nil {
 		title, _ = titleElem.Text()
 	}
@@ -95,21 +90,21 @@ func (b *BrowserEngine) Navigate(url string) (title, content, finalURL string, l
 	}
 
 	// Extract text content
-	content = b.extractContent()
+	content = r.extractContent()
 
 	// Extract links
-	links = b.extractLinks()
+	links = r.extractLinks()
 
 	// Get final URL (after redirects)
-	finalURL = b.page.MustInfo().URL
+	finalURL = r.page.MustInfo().URL
 
 	return title, content, finalURL, links, nil
 }
 
 // extractContent gets readable text from the page
-func (b *BrowserEngine) extractContent() string {
+func (r *RodEngine) extractContent() string {
 	// Use JavaScript to extract and clean text content
-	bodyText := b.page.MustEval(`() => {
+	bodyText := r.page.MustEval(`() => {
 		// Remove script and style elements
 		const scripts = document.querySelectorAll('script, style, noscript, iframe');
 		scripts.forEach(el => el.remove());
@@ -197,9 +192,9 @@ func (b *BrowserEngine) extractContent() string {
 }
 
 // extractLinks gets all clickable links from the page
-func (b *BrowserEngine) extractLinks() []Link {
+func (r *RodEngine) extractLinks() []Link {
 	// Use JavaScript to extract links
-	linksData := b.page.MustEval(`() => {
+	linksData := r.page.MustEval(`() => {
 		const links = [];
 		const anchorElements = document.querySelectorAll('a[href]');
 
@@ -256,16 +251,16 @@ func (b *BrowserEngine) extractLinks() []Link {
 }
 
 // Reload refreshes the current page
-func (b *BrowserEngine) Reload() error {
-	return b.page.Reload()
+func (r *RodEngine) Reload() error {
+	return r.page.Reload()
 }
 
 // Close cleans up browser resources
-func (b *BrowserEngine) Close() {
-	if b.page != nil {
-		b.page.Close()
+func (r *RodEngine) Close() {
+	if r.page != nil {
+		r.page.Close()
 	}
-	if b.browser != nil {
-		b.browser.Close()
+	if r.browser != nil {
+		r.browser.Close()
 	}
 }

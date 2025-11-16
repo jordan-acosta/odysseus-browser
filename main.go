@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"os"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/textinput"
@@ -31,8 +32,8 @@ type errorMsg struct {
 	err error
 }
 
-type engineInitializedMsg struct{
-	engine *BrowserEngine
+type engineInitializedMsg struct {
+	engine Engine
 }
 
 type engineInitializationFailedMsg struct {
@@ -42,7 +43,7 @@ type engineInitializationFailedMsg struct {
 // Main model for our TUI browser
 type model struct {
 	// Browser engine
-	engine *BrowserEngine
+	engine Engine
 
 	// UI state
 	mode        viewMode
@@ -112,9 +113,34 @@ func (m model) Init() tea.Cmd {
 	)
 }
 
-// Initialize headless browser
+// Initialize browser engine
 func (m *model) initBrowser() tea.Msg {
-	engine, err := NewBrowserEngine()
+	// Determine which engine to use
+	// Default to goquery (works everywhere), but allow rod via env var
+	engineType := os.Getenv("ODYSSEUS_ENGINE")
+	if engineType == "" {
+		engineType = "goquery" // Default
+	}
+
+	var engine Engine
+	var err error
+
+	switch engineType {
+	case "rod":
+		engine, err = NewRodEngine()
+		if err != nil {
+			// Fall back to goquery if rod fails
+			log.Printf("Rod engine failed to initialize, falling back to goquery: %v", err)
+			engine, err = NewGoqueryEngine()
+		}
+	case "goquery":
+		engine, err = NewGoqueryEngine()
+	default:
+		// Unknown engine type, default to goquery
+		log.Printf("Unknown engine type '%s', using goquery", engineType)
+		engine, err = NewGoqueryEngine()
+	}
+
 	if err != nil {
 		return engineInitializationFailedMsg{err: err}
 	}
