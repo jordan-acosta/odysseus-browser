@@ -60,6 +60,10 @@ type model struct {
 	selectedLinkIdx  int
 	linkScrollOffset int
 
+	// Scrolling
+	contentScrollOffset int
+	contentLines        []string
+
 	// Display
 	width  int
 	height int
@@ -89,19 +93,21 @@ func initialModel() model {
 	linkSearch.Width = 80
 
 	return model{
-		mode:               urlInputMode,
-		urlInput:           ti,
-		linkSearchInput:    linkSearch,
-		currentURL:         "",
-		history:            make([]string, 0),
-		historyIdx:         -1,
-		links:              make([]Link, 0),
-		selectedLinkIdx:    0,
-		linkScrollOffset:   0,
-		width:              80,
-		height:             24,
-		engineReady:        false,
-		engineInitializing: true,
+		mode:                urlInputMode,
+		urlInput:            ti,
+		linkSearchInput:     linkSearch,
+		currentURL:          "",
+		history:             make([]string, 0),
+		historyIdx:          -1,
+		links:               make([]Link, 0),
+		selectedLinkIdx:     0,
+		linkScrollOffset:    0,
+		contentScrollOffset: 0,
+		contentLines:        make([]string, 0),
+		width:               80,
+		height:              24,
+		engineReady:         false,
+		engineInitializing:  true,
 	}
 }
 
@@ -179,6 +185,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.urlInput.Width = min(msg.Width-4, 100)
+
+		// Re-wrap content if we have any
+		if m.pageContent != "" {
+			wrapped := wordWrap(m.pageContent, m.width-6)
+			m.contentLines = strings.Split(wrapped, "\n")
+
+			// Clamp scroll offset if content got shorter
+			maxScroll := len(m.contentLines) - (m.height - 10)
+			if maxScroll < 0 {
+				maxScroll = 0
+			}
+			if m.contentScrollOffset > maxScroll {
+				m.contentScrollOffset = maxScroll
+			}
+		}
+
 		return m, nil
 
 	case tea.KeyMsg:
@@ -255,10 +277,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, m.navigate(m.currentURL)
 				}
 			case "j", "down":
-				// Scroll down (simplified - would need better implementation)
-				// In a full implementation, we'd track scroll position
+				// Scroll down by 1 line
+				m.scrollDown(1)
 			case "k", "up":
-				// Scroll up
+				// Scroll up by 1 line
+				m.scrollUp(1)
+			case "ctrl+d":
+				// Scroll down by half page
+				halfPage := (m.height - 10) / 2
+				if halfPage < 1 {
+					halfPage = 1
+				}
+				m.scrollDown(halfPage)
+			case "ctrl+u":
+				// Scroll up by half page
+				halfPage := (m.height - 10) / 2
+				if halfPage < 1 {
+					halfPage = 1
+				}
+				m.scrollUp(halfPage)
+			case "ctrl+f", "pgdown":
+				// Scroll down by full page
+				fullPage := m.height - 10
+				if fullPage < 1 {
+					fullPage = 1
+				}
+				m.scrollDown(fullPage)
+			case "ctrl+b", "pgup":
+				// Scroll up by full page
+				fullPage := m.height - 10
+				if fullPage < 1 {
+					fullPage = 1
+				}
+				m.scrollUp(fullPage)
+			case "home":
+				// Jump to top
+				m.contentScrollOffset = 0
+			case "end":
+				// Jump to bottom
+				maxScroll := len(m.contentLines) - (m.height - 10)
+				if maxScroll < 0 {
+					maxScroll = 0
+				}
+				m.contentScrollOffset = maxScroll
 			}
 
 		case linkSelectionMode:
@@ -331,7 +392,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.links = msg.links
 		m.selectedLinkIdx = 0
 		m.linkScrollOffset = 0
+		m.contentScrollOffset = 0
 		m.err = nil
+
+		// Prepare content lines for scrolling
+		wrapped := wordWrap(msg.content, m.width-6)
+		m.contentLines = strings.Split(wrapped, "\n")
 
 		// Update history
 		if m.historyIdx == -1 || m.history[m.historyIdx] != msg.url {
@@ -365,6 +431,31 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+// scrollDown scrolls content down by n lines (with bounds checking)
+func (m *model) scrollDown(lines int) {
+	if len(m.contentLines) == 0 {
+		return
+	}
+
+	maxScroll := len(m.contentLines) - (m.height - 10)
+	if maxScroll < 0 {
+		maxScroll = 0
+	}
+
+	m.contentScrollOffset += lines
+	if m.contentScrollOffset > maxScroll {
+		m.contentScrollOffset = maxScroll
+	}
+}
+
+// scrollUp scrolls content up by n lines (with bounds checking)
+func (m *model) scrollUp(lines int) {
+	m.contentScrollOffset -= lines
+	if m.contentScrollOffset < 0 {
+		m.contentScrollOffset = 0
+	}
 }
 
 // View renders the UI
@@ -445,16 +536,55 @@ func (m model) View() string {
 	} else if m.err != nil {
 		s.WriteString(errorStyle.Render(fmt.Sprintf("❌ Error: %v", m.err)))
 	} else if m.pageContent != "" {
-		// Show page content with word wrapping
-		wrapped := wordWrap(m.pageContent, m.width-6)
-		// Limit to screen height
-		lines := strings.Split(wrapped, "\n")
+		// Show page content with scrolling
 		maxLines := m.height - 10 // Reserve space for header and help
-		if len(lines) > maxLines {
-			lines = lines[:maxLines]
-			lines = append(lines, helpStyle.Render("[More content below - full scrolling not implemented in POC]"))
+		totalLines := len(m.contentLines)
+
+		// Calculate visible slice
+		startLine := m.contentScrollOffset
+		endLine := m.contentScrollOffset + maxLines
+
+		if endLine > totalLines {
+			endLine = totalLines
 		}
-		s.WriteString(contentStyle.Render(strings.Join(lines, "\n")))
+
+		// Get visible lines
+		var visibleLines []string
+		if startLine < totalLines {
+			visibleLines = m.contentLines[startLine:endLine]
+		}
+
+		s.WriteString(contentStyle.Render(strings.Join(visibleLines, "\n")))
+
+		// Show scroll indicators
+		if totalLines > maxLines {
+			s.WriteString("\n\n")
+
+			// Calculate scroll percentage
+			scrollPercent := 0
+			if totalLines > maxLines {
+				scrollPercent = (m.contentScrollOffset * 100) / (totalLines - maxLines)
+			}
+
+			// Show position indicator
+			endLineNum := endLine
+			if endLineNum > totalLines {
+				endLineNum = totalLines
+			}
+
+			scrollInfo := fmt.Sprintf("Lines %d-%d of %d (%d%%)",
+				startLine+1, endLineNum, totalLines, scrollPercent)
+
+			// Add visual indicators
+			if m.contentScrollOffset > 0 {
+				scrollInfo = "▲ " + scrollInfo
+			}
+			if endLine < totalLines {
+				scrollInfo = scrollInfo + " ▼"
+			}
+
+			s.WriteString(helpStyle.Render(scrollInfo))
+		}
 	} else if m.mode == browsingMode {
 		if !m.engineReady {
 			if m.engineInitializing {
@@ -522,12 +652,12 @@ func (m model) View() string {
 	s.WriteString("\n\n")
 	if m.mode == browsingMode {
 		help := []string{
-			"[l/Ctrl+L] URL bar",
+			"[l] URL",
 			"[/,g] Links",
-			"[b] Back",
-			"[f] Forward",
+			"[j/k] Scroll",
+			"[b/f] Back/Fwd",
 			"[r] Reload",
-			"[q/Ctrl+C] Quit",
+			"[q] Quit",
 		}
 		s.WriteString(helpStyle.Render(strings.Join(help, " • ")))
 	} else if m.mode == linkSelectionMode {
